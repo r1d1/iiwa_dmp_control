@@ -2,10 +2,11 @@
 import threading
 import rospy
 
-from geometry_msgs.msg import *
+from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray, Int32MultiArray, MultiArrayDimension, Bool, Int32, String
 from trajectory_msgs.msg import JointTrajectory 
+from control_msgs.msg import JointTrajectoryControllerState
 from control_msgs.msg import JointTrajectoryControllerState
 import numpy as np
 
@@ -15,8 +16,8 @@ import pandas as pd
 from iiwa_dmp_control.srv import *
 import matplotlib.pyplot as plt
 
-class DmpController():
-    def __init__(self, db, dmptype, saving, plotting):
+class CartDmpController():
+    def __init__(self, db, saving, plotting):
         
         print("Should we store generated trajectory: "+str(saving))
         self.saved_traj = []
@@ -28,7 +29,6 @@ class DmpController():
         lengths = []
         raw_traj_data = []
         traj_data = []
-        #self.dmptype = dmptype
         self.dmptype = None
 
         if db is None:
@@ -55,7 +55,7 @@ class DmpController():
             interp_data = pd.DataFrame(columns=list(d.columns.values))
             interp_data['scaled_time'] = indices
             for count in np.arange(7):
-                col_name = 'arm_'+self.dmptype+'_pose'+('_wf' if self.dmptype == 'cart' else '')+'_'+str(count)
+                col_name = 'arm_cart_pose_wf_'+str(count)
                 interp_data[col_name] = np.interp(indices, d['scaled_time'], d[col_name])
 
             traj_data.append(interp_data)
@@ -97,18 +97,16 @@ class DmpController():
             
             mean_init = np.mean(self.dataset[:,0,1:], 0)
             mean_goal = np.mean(self.dataset[:,-1,1:], 0)
-            if self.dmptype == 'cart':
-                g0 = PoseStamped()
-                g0.pose.position.x = mean_goal[0]
-                g0.pose.position.y = mean_goal[1]
-                g0.pose.position.z = mean_goal[2]
-                g0.pose.orientation.x = mean_goal[3]
-                g0.pose.orientation.y = mean_goal[4]
-                g0.pose.orientation.z = mean_goal[5]
-                g0.pose.orientation.w = mean_goal[6]
-            else:
-                g0 = JointState()
-                g0.position = mean_goal
+            
+            g0 = PoseStamped()
+            g0.pose.position.x = mean_goal[0]
+            g0.pose.position.y = mean_goal[1]
+            g0.pose.position.z = mean_goal[2]
+            g0.pose.orientation.x = mean_goal[3]
+            g0.pose.orientation.y = mean_goal[4]
+            g0.pose.orientation.z = mean_goal[5]
+            g0.pose.orientation.w = mean_goal[6]
+            
             # Generate sample data from demos
             gen_data = self.generate_traj(mean_init, g0)
             
@@ -125,40 +123,30 @@ class DmpController():
             exp_nb = ''
             for d in args.demo:
                 nb = d.split("/")[-1].split(".")[0].split("_")[-1]
-                print nb
                 exp_nb += nb
-            print exp_nb
             #self.fig.savefig("/home/erwan/Documents/IMAGINE/IMAGINE-2018-TR-ADES/figures/push_from_right_dmp_"+exp_nb+".pdf", dpi=300)
             plt.show()
         # ---------------------
 
         self.timer = rospy.Timer(rospy.Duration(0.05), self.timer_cb)
         self.exec_traj = False
-        #self.traj = {"right":Float64MultiArray, "left":Float64MultiArray}
-        self.arm_state = JointTrajectoryControllerState()
+        self.cart_arm_state = PoseStamped()
 
         # Manage DMP parameters
         self.set_param_serv = rospy.Service("/dmp_controller/set_params", SetParams, self.set_params)
         self.get_param_serv = rospy.Service("/dmp_controller/get_params", GetParams, self.get_params)
 
-        # DMP are in cartesian space but state/command is anyway in JointSpace
-        self.arm_state_sub = rospy.Subscriber("/iiwa/PositionJointInterface_trajectory_controller/state", JointTrajectoryControllerState, self.arm_state_cb)
-        self.arm_command_pub = rospy.Publisher("/iiwa/PositionJointInterface_trajectory_controller/command", JointTrajectory, queue_size=1)
+        self.cart_arm_state_sub = rospy.Subscriber("/iiwa/state/CartesianPose", PoseStamped, self.cart_arm_state_cb)
+        self.cart_arm_command_pub = rospy.Publisher("/iiwa/command/CartesianPose", PoseStamped, queue_size=1)
         self.cart_goal_sub = rospy.Subscriber("/iiwa/dmp_goal", PoseStamped, self.goal_cb)
         
-        # feedback to requesting node
-        self.gesture_done_pub = rospy.Publisher("iiwa/gesture_finished", Bool, queue_size=1)
-       
-        signal_done = Bool()
-        signal_done.data = True
-        self.gesture_done_pub.publish(signal_done)
-
-        print "%s Controller initialized" % (self.dmptype,)
+        print("Controller initialized")
         
-    def arm_state_cb(self, msg):
-        #print(msg)
+    def cart_arm_state_cb(self, msg):
+        print(msg)
         # Position in joint space
-        self.arm_state = msg.actual.positions
+        #self.arm_state = msg.actual.positions
+        self.cart_arm_state = msg
 
     # service implementation
     def set_params(self, req):
@@ -260,20 +248,7 @@ class DmpController():
         des_tau = self.motion_duration
 
         # Initialize current position and velocities ( e.g. move the arm to the initial position )
-        if self.dmptype == "cart":
-            #x0 = np.array([self.arm_state.position.x, self.arm_state.position.y, self.arm_state.position.z, self.arm_state.orientation.x, self.arm_state.orientation.y, self.arm_state.orientation.z, self.arm_state.orientation.w])
-            g0 = np.array([pose.pose.position.x, pose.pose.position.y, pose.pose.position.z, pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w])
-        elif self.dmptype == "joint":
-            if len(pose.position) == 7:
-                g0 = np.array(pose.position)
-            else:
-                print "Erroneous joint goal size ; Exiting ..."
-                exit()
-        else:
-            print "Unknown type ; Exiting ..."
-            exit()
-        #print "Starting position (x0):", x0
-        #print "Goal position (g0):", g0
+        g0 = np.array([pose.pose.position.x, pose.pose.position.y, pose.pose.position.z, pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w])
     
         current_pos = x0 
         current_vel = np.zeros(self.DoF)  # Initially the robot arm is at rest
@@ -283,6 +258,7 @@ class DmpController():
         #t = 0. 
         i = 0 ## burayi da duzelt
         #traj = np.zeros(3)
+        # Adding x0 at traj point list
         traj = x0
         print x0
         joint_traj = np.zeros(7)
@@ -312,88 +288,58 @@ class DmpController():
     # now traj callbacks should convert the cart goal into a joint trajectory
     def goal_cb(self, msg):
         # MSG is a cartesian goal pose
-        x0 = []
-        if self.dmptype == "cart":
-            x0 = np.array([self.arm_state.position.x, self.arm_state.position.y, self.arm_state.position.z, self.arm_state.orientation.x, self.arm_state.orientation.y, self.arm_state.orientation.z, self.arm_state.orientation.w])
-        elif self.dmptype == "joint":
-            if len(pose.position) == 7:
-                #print msg
-                x0 = np.array(self.arm_state.position)
-            else:
-                print "Issue with data length:",len(pose.position)
+        x0 = np.array([self.cart_arm_state.pose.position.x, self.cart_arm_state.pose.position.y, self.cart_arm_state.pose.position.z, self.cart_arm_state.pose.orientation.x, self.cart_arm_state.pose.orientation.y, self.cart_arm_state.pose.orientation.z, self.cart_arm_state.pose.orientation.w])
+        
         traj = self.generate_traj(x0, msg) # result of IK
-        self.traj[self.active_arm] = traj
+        self.traj = traj
+        #print(self.traj)
         self.exec_traj = True
         print("Arm traj")
-
-    #def right_pose_cb(self, msg):
-    #    self.arm_pose["right"] = msg
-
-    #def left_pose_cb(self, msg):
-    #    self.arm_pose["left"] = msg
+        print(self.exec_traj)
 
     def timer_cb(self, msg):
         if self.exec_traj:
-            dims =[]
-            print "Exec DMP"
-            for d in self.traj[self.active_arm]:
-                if self.dmptype == "cart":
-                    cmd = Pose()
-                    cmd.position.x = d[0]
-                    cmd.position.y = d[1]
-                    cmd.position.z = d[2]
-                    cmd.orientation.x = d[3]
-                    cmd.orientation.y = d[4]
-                    cmd.orientation.z = d[5]
-                    cmd.orientation.w = d[6]
-                elif self.dmptype == "joint":
-                    cmd = Float64MultiArray()
-                    cmd.layout.dim.append(MultiArrayDimension())
-                    cmd.layout.dim[0].label='RAD'
-                    cmd.layout.dim[0].size=7
-                    cmd.layout.dim[0].stride=0
-                    cmd.layout.data_offset=0
-                    cmd.data=d
-                else:
-                    print "Should never happen: type of DMP unknown, can't send command ; Exiting ..."
-                    exit()
+            print("Exec DMP")
+            count = 0
+            for d in self.traj:
+                #cmd = Pose()
+                cmd = PoseStamped()
+                cmd.pose.position.x = d[0]
+                cmd.pose.position.y = d[1]
+                cmd.pose.position.z = d[2]
+                cmd.pose.orientation.x = d[3]
+                cmd.pose.orientation.y = d[4]
+                cmd.pose.orientation.z = d[5]
+                cmd.pose.orientation.w = d[6]
 
-                begin = rospy.Time.now()
+                cmd.header.stamp = rospy.Time.now()
+                cmd.header.frame_id = 'iiwa_link_0'
+                #cmd.header.seq = count
+                count += 1
                 timeout = 0.1
                 minimal_walltime_timeout = 0.1
                 try:
-                    if self.active_arm == "left":
-                        self.left_ptp_pub.publish(cmd)
-                        # the minimal_walltime_timeout below sets the
-                        # smallest wall-time timeout we handle.  if we
-                        # try to wait for a smaller timeout it will be
-                        # as much as this. A solution for simulation
-                        # time, that allows for smaller
-                        # walltime-timeouts (in case of a faster than
-                        # realtime simulation time, still needs to be
-                        # implemented.
-                        while not self.left_ptp_done.wait(minimal_walltime_timeout):
-                            if (rospy.Time.now() - begin) > rospy.Duration(timeout):
-                                break
-                            else:
-                                pass
-                        self.left_ptp_done.clear()
-                    else:
-                        self.right_ptp_pub.publish(cmd)
-                        while not self.right_ptp_done.wait(minimal_walltime_timeout):
-                            if (rospy.Time.now() - begin) > rospy.Duration(timeout):
-                                break
-                            else:
-                                pass
-                        self.right_ptp_done.clear()
+                    #self.left_ptp_pub.publish(cmd)
+                    self.cart_arm_command_pub.publish(cmd)
+                    # the minimal_walltime_timeout below sets the
+                    # smallest wall-time timeout we handle.  if we
+                    # try to wait for a smaller timeout it will be
+                    # as much as this. A solution for simulation
+                    # time, that allows for smaller
+                    # walltime-timeouts (in case of a faster than
+                    # realtime simulation time, still needs to be
+                    # implemented.
+                    #while not self.left_ptp_done.wait(minimal_walltime_timeout):
+                    #    if (rospy.Time.now() - begin) > rospy.Duration(timeout):
+                    #        break
+                    #    else:
+                    #        pass
+                    #self.left_ptp_done.clear()
                 except Exception as e:
-                    print e
+                    print(e)
 
             self.exec_traj = False
-            signal_done = Bool()
-            signal_done.data = True
-            self.gesture_done_pub.publish(signal_done)
-            print "Done"
+            print("Done")
 
 if __name__ == "__main__":
     import argparse
@@ -403,15 +349,14 @@ if __name__ == "__main__":
     #parser.add_argument('--demo', type=argparse.FileType('r'), nargs='+', help="dmp demo data")
     parser.add_argument('--demo', type=str, nargs='+', help="dmp demo data")
     #parser.add_argument('--robot', type=str, default="/simulation", help="simulation or real")
-    parser.add_argument('--type', type=str, default="cart", help="cart or joint: cartesian or joint dmp")
+    #parser.add_argument('--type', type=str, default="cart", help="cart or joint: cartesian or joint dmp")
     parser.add_argument('--save', action='store_true', help="should we save generated traj ?")
     parser.add_argument('--plot', action='store_true', help="should we display trajectories (demo, mean, generated) ?")
     args = parser.parse_args()
-    rospy.init_node(args.type+"_dmp_ptp")
-    print args.demo, args.type
+    rospy.init_node("iiwa_cart_dmp")
+    print(args.demo)
 
-
-    dcc = DmpController(db=args.demo, dmptype=args.type, saving=args.save, plotting=args.plot)
+    dcc = CartDmpController(db=args.demo, saving=args.save, plotting=args.plot)
 
     rospy.spin()
 

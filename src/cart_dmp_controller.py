@@ -4,7 +4,7 @@ import rospy
 
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float64MultiArray, Int32MultiArray, MultiArrayDimension, Bool, Int32, String
+from std_msgs.msg import Float64MultiArray, Int32MultiArray, MultiArrayDimension, Bool, Int32, String, Time
 from trajectory_msgs.msg import JointTrajectory 
 from control_msgs.msg import JointTrajectoryControllerState
 from control_msgs.msg import JointTrajectoryControllerState
@@ -131,19 +131,24 @@ class CartDmpController():
         self.timer = rospy.Timer(rospy.Duration(0.05), self.timer_cb)
         self.exec_traj = False
         self.cart_arm_state = PoseStamped()
+        self.dest_reached = False
 
         # Manage DMP parameters
         self.set_param_serv = rospy.Service("/dmp_controller/set_params", SetParams, self.set_params)
         self.get_param_serv = rospy.Service("/dmp_controller/get_params", GetParams, self.get_params)
 
         self.cart_arm_state_sub = rospy.Subscriber("/iiwa/state/CartesianPose", PoseStamped, self.cart_arm_state_cb)
+        self.cart_arm_state_sub = rospy.Subscriber("/iiwa/state/DestinationReached", Time, self.dest_reached_cb)
         self.cart_arm_command_pub = rospy.Publisher("/iiwa/command/CartesianPose", PoseStamped, queue_size=1)
         self.cart_goal_sub = rospy.Subscriber("/iiwa/dmp_goal", PoseStamped, self.goal_cb)
         
         print("Controller initialized")
         
+    def dest_reached_cb(self, msg):
+        self.dest_reached = True
+
     def cart_arm_state_cb(self, msg):
-        print(msg)
+        #print(msg)
         # Position in joint space
         #self.arm_state = msg.actual.positions
         self.cart_arm_state = msg
@@ -302,7 +307,6 @@ class CartDmpController():
             print("Exec DMP")
             count = 0
             for d in self.traj:
-                #cmd = Pose()
                 cmd = PoseStamped()
                 cmd.pose.position.x = d[0]
                 cmd.pose.position.y = d[1]
@@ -321,20 +325,10 @@ class CartDmpController():
                 try:
                     #self.left_ptp_pub.publish(cmd)
                     self.cart_arm_command_pub.publish(cmd)
-                    # the minimal_walltime_timeout below sets the
-                    # smallest wall-time timeout we handle.  if we
-                    # try to wait for a smaller timeout it will be
-                    # as much as this. A solution for simulation
-                    # time, that allows for smaller
-                    # walltime-timeouts (in case of a faster than
-                    # realtime simulation time, still needs to be
-                    # implemented.
-                    #while not self.left_ptp_done.wait(minimal_walltime_timeout):
-                    #    if (rospy.Time.now() - begin) > rospy.Duration(timeout):
-                    #        break
-                    #    else:
-                    #        pass
-                    #self.left_ptp_done.clear()
+                    # Waiting is not needed: it creates shaky movements 
+                    #while not self.dest_reached:
+                    #    pass
+                    #self.dest_reached = False
                 except Exception as e:
                     print(e)
 

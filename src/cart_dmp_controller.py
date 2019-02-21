@@ -310,7 +310,8 @@ class CartDmpController():
                 cmd = PoseStamped()
                 cmd.pose.position.x = d[0]
                 cmd.pose.position.y = d[1]
-                cmd.pose.position.z = d[2]
+                # Adding boundary value on z to avoid collision with the table
+                cmd.pose.position.z = d[2] if d[2] > 0.001 else 0.001
                 cmd.pose.orientation.x = d[3]
                 cmd.pose.orientation.y = d[4]
                 cmd.pose.orientation.z = d[5]

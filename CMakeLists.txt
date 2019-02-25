@@ -13,6 +13,9 @@ find_package(catkin REQUIRED COMPONENTS
   std_msgs
   control_msgs
   message_generation
+  sensor_msgs
+  vision_msgs
+  imagine_common
 )
 
 ## System dependencies are found with CMake's conventions
@@ -73,6 +76,8 @@ add_service_files(
 generate_messages(
    DEPENDENCIES
    std_msgs
+   sensor_msgs
+   imagine_common
 )
 
 ################################################

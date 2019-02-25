@@ -3,11 +3,11 @@ import threading
 import rospy
 
 from geometry_msgs.msg import PoseStamped
-from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray, Int32MultiArray, MultiArrayDimension, Bool, Int32, String, Time
 from trajectory_msgs.msg import JointTrajectory 
 from control_msgs.msg import JointTrajectoryControllerState
 from control_msgs.msg import JointTrajectoryControllerState
+from imagine_common.msg import DMPGoal
 import numpy as np
 
 from colors_toolbox import DMP as ctd
@@ -108,13 +108,14 @@ class CartDmpController():
             g0.pose.orientation.w = mean_goal[6]
             
             # Generate sample data from demos
-            gen_data = self.generate_traj(mean_init, g0)
+            gen_data = self.generate_traj(mean_init, g0, self.motion_duration)
             
             for i in np.arange(self.DoF):
                 self.ax = self.fig.add_subplot(int(self.DoF/2)+1,2,i+1)
-                mapped = np.interp(indices, np.arange(len(gen_data[:,i])), gen_data[:,i])
-                self.ax.plot(indices, gen_data[:,i], c=colors[i], lw=2, label="dmp")
-                self.ax.fill_between(indices, min_traj[:,i], max_traj[:,i], alpha=0.2)
+                mapped = np.interp(gen_data[:,0], np.arange(len(gen_data[:,1+i])), gen_data[:,1+i])
+                #self.ax.plot(indices, gen_data[:,i], c=colors[i], lw=2, label="dmp")
+                self.ax.plot(gen_data[:,0], gen_data[:,1+i], c=colors[i], lw=2, label="dmp")
+                #self.ax.fill_between(gen_data[:,0], min_traj[:,i], max_traj[:,i], alpha=0.2)
                 self.ax.set_xlabel("time")
                 self.ax.set_ylabel("value")
                 self.ax.set_title("dimension "+str(i))
@@ -140,7 +141,8 @@ class CartDmpController():
         self.cart_arm_state_sub = rospy.Subscriber("/iiwa/state/CartesianPose", PoseStamped, self.cart_arm_state_cb)
         self.cart_arm_state_sub = rospy.Subscriber("/iiwa/state/DestinationReached", Time, self.dest_reached_cb)
         self.cart_arm_command_pub = rospy.Publisher("/iiwa/command/CartesianPose", PoseStamped, queue_size=1)
-        self.cart_goal_sub = rospy.Subscriber("/iiwa/dmp_goal", PoseStamped, self.goal_cb)
+        #self.cart_goal_sub = rospy.Subscriber("/iiwa/dmp_goal", PoseStamped, self.goal_cb)
+        self.cart_goal_sub = rospy.Subscriber("/iiwa/dmp_goal", DMPGoal, self.goal_cb)
         
         print("Controller initialized")
         
@@ -241,16 +243,18 @@ class CartDmpController():
     #    else:
     #        self.left_ptp_done.clear()
 
-    def generate_traj(self, x0, pose):
-        # pose is either PoseStamped or JointState
+    def generate_traj(self, x0, pose, duration):
         # Set force feedback to zero for this example
         zeta = 0 # force feedback at
 
         # Set delta time for numerical differentiation 
         #nb_target_points = 40
         nb_target_points = self.miniLength
-        dt = self.motion_duration/nb_target_points
-        des_tau = self.motion_duration
+        #dt = self.motion_duration/nb_target_points
+        self.motion_duration = float(duration)
+        dt = float(duration)/nb_target_points
+        #des_tau = self.motion_duration
+        des_tau = float(duration)
 
         # Initialize current position and velocities ( e.g. move the arm to the initial position )
         g0 = np.array([pose.pose.position.x, pose.pose.position.y, pose.pose.position.z, pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w])
@@ -265,7 +269,7 @@ class CartDmpController():
         #traj = np.zeros(3)
         # Adding x0 at traj point list
         traj = x0
-        print x0
+        print(x0)
         joint_traj = np.zeros(7)
         time_traj = np.zeros((1,1))
 
@@ -288,16 +292,21 @@ class CartDmpController():
 
         #self.saved_traj.append(traj)
         self.saved_traj.append(stamped_traj)
-        return traj
+        #return traj
+        return stamped_traj
 
     # now traj callbacks should convert the cart goal into a joint trajectory
     def goal_cb(self, msg):
-        # MSG is a cartesian goal pose
+        # MSG is a cartesian goal pose + duration (DMPGoal.msg)
         x0 = np.array([self.cart_arm_state.pose.position.x, self.cart_arm_state.pose.position.y, self.cart_arm_state.pose.position.z, self.cart_arm_state.pose.orientation.x, self.cart_arm_state.pose.orientation.y, self.cart_arm_state.pose.orientation.z, self.cart_arm_state.pose.orientation.w])
         
-        traj = self.generate_traj(x0, msg) # result of IK
+        #print(msg.cart_pose.header.stamp.secs)
+        #print(msg.cart_pose.pose)
+        duration = msg.duration
+        #print(type(duration.to_sec()))
+
+        traj = self.generate_traj(x0, msg.cart_pose, duration.data.to_sec()) # result of IK
         self.traj = traj
-        #print(self.traj)
         self.exec_traj = True
         print("Arm traj")
         print(self.exec_traj)
@@ -305,27 +314,36 @@ class CartDmpController():
     def timer_cb(self, msg):
         if self.exec_traj:
             print("Exec DMP")
+            offset = 0
+            if len(self.traj[0]) == 8:
+                print("stamped traj")
+                offset = 1
             count = 0
+            prev = 0
+            #start_time = rospy.Time.now()
             for d in self.traj:
                 cmd = PoseStamped()
-                cmd.pose.position.x = d[0]
-                cmd.pose.position.y = d[1]
+                cmd.pose.position.x = d[offset+0]
+                cmd.pose.position.y = d[offset+1]
                 # Adding boundary value on z to avoid collision with the table
-                cmd.pose.position.z = d[2] if d[2] > 0.001 else 0.001
-                cmd.pose.orientation.x = d[3]
-                cmd.pose.orientation.y = d[4]
-                cmd.pose.orientation.z = d[5]
-                cmd.pose.orientation.w = d[6]
+                cmd.pose.position.z = d[offset+2] if d[offset+2] > 0.001 else 0.001
+                cmd.pose.orientation.x = d[offset+3]
+                cmd.pose.orientation.y = d[offset+4]
+                cmd.pose.orientation.z = d[offset+5]
+                cmd.pose.orientation.w = d[offset+6]
 
+                #cmd.header.stamp = start_time + rospy.Duration.from_sec(d[0])
                 cmd.header.stamp = rospy.Time.now()
                 cmd.header.frame_id = 'iiwa_link_0'
                 #cmd.header.seq = count
-                count += 1
                 timeout = 0.1
                 minimal_walltime_timeout = 0.1
                 try:
                     #self.left_ptp_pub.publish(cmd)
                     self.cart_arm_command_pub.publish(cmd)
+                    #print(d[0] - prev)
+                    rospy.sleep(d[0] - prev)
+                    prev = d[0]
                     # Waiting is not needed: it creates shaky movements 
                     #while not self.dest_reached:
                     #    pass

@@ -1,35 +1,43 @@
 #!/usr/bin/env python
-import threading
-import rospy
 
+'''
+    Ultimate controller imagine; control arm (DMP), gripper, suction
+'''
+
+import rospy
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Float64MultiArray, Int32MultiArray, MultiArrayDimension, Bool, Int32, String, Time
+from std_srvs.srv import Empty
 from trajectory_msgs.msg import JointTrajectory 
 from control_msgs.msg import JointTrajectoryControllerState
-from control_msgs.msg import JointTrajectoryControllerState
-from imagine_common.msg import DMPGoal
+from imagine_common.msg import UltimateDMPGoal
 import numpy as np
 
 from colors_toolbox import DMP as ctd
 #import actionlib
-import pandas as pd
 from iiwa_dmp_control.srv import *
+from caros_control_msgs.srv import GripperMoveQ 
+from caros_control_msgs.msg import GripperState
+import pandas as pd
 import matplotlib.pyplot as plt
+from sklearn import preprocessing
 
-class CartDmpController():
+class UltimateController():
     def __init__(self, db, saving, plotting):
         
         print("Should we store generated trajectory: "+str(saving))
         self.saved_traj = []
         self.plotting = plotting
-        # --- beginning of dmp stuff
+
+        # --- 
         # DMP from BOUN toolbox / it needs to be initialized
         # for the purpose of testing, let's load that with a hardcoded traj:
-
         lengths = []
         raw_traj_data = []
         traj_data = []
         self.dmptype = None
+        # default motion duration is 1 second
+        self.motion_duration = 1.0
 
         if db is None:
             print("No demonstration data provided ; can't train and generate dmp. Exiting ...")
@@ -41,38 +49,34 @@ class CartDmpController():
                 lengths.append(len(raw_traj_data[-1]))
 
         nb_exp = len(raw_traj_data)
-        print nb_exp, " demonstrations provided"
-        rescaledData = []
+        #print(raw_traj_data[0]['scaled_time'])
+        print(nb_exp, " demonstrations provided")
         self.miniLength = max(lengths)
 
-        print "Max data length", self.miniLength
+        print("Max data length", self.miniLength)
         # interpolate to have same size data
         # raw_traj_data : 1 element per exp, e.g. 5 elements
-        indices = np.linspace(0., 1., num=self.miniLength)
-        print "indices len:",len(indices)
+        self.motion_duration = 4.35
+        indices = np.linspace(0., self.motion_duration, num=self.miniLength)
+        print("indices len:",len(indices))
         for d in raw_traj_data:
+            # each d is a demonstration
             steps = len(d)
-            interp_data = pd.DataFrame(columns=list(d.columns.values))
-            interp_data['scaled_time'] = indices
-            for count in np.arange(7):
-                col_name = 'arm_cart_pose_wf_'+str(count)
-                interp_data[col_name] = np.interp(indices, d['scaled_time'], d[col_name])
-
-            traj_data.append(interp_data)
+            # Just scale the time
+            d['scaled_time'] = indices 
+            traj_data.append(d)
 
         # Create trajectories to encode in DMP
-        self.dataset = np.array([traj_data[e].as_matrix() for e in np.arange(len(traj_data))])
+        self.dataset = np.array([traj_data[e].values for e in np.arange(len(traj_data))])
 
-        # we need to scale the duration to a relevant value/pass the desired value
-        self.motion_duration = 1.0
         # ------------------------ end of dmp stuff
         # Degrees of freedom for DMP 
-        # cartesian or joint dmp, thus 3+4 or 7 dof
+        # cartesian dmp + gripper + suck, thus (3+4)+1+1 or 7 dof
         self.DoF = self.dataset[0,0,1:].shape[0]
-        print "Found",self.DoF,"DOF in data."
+        print("Found",self.DoF,"DOF in data.")
         
         self.dataset2 = np.reshape(self.dataset, (len(traj_data)*len(traj_data[0]), (self.DoF+1)))
-        print "Dataset2 shape:", self.dataset2.shape, len(traj_data), len(traj_data[0])
+        print("Dataset2 shape:", self.dataset2.shape, len(traj_data), len(traj_data[0]))
         K = 150 * np.ones(self.DoF)
         self.bf_number = 20
 
@@ -80,42 +84,36 @@ class CartDmpController():
         
         # ------- Plotting
         self.fig = None
+        from palettable.colorbrewer.qualitative import Set3_12
+        self.colors = Set3_12.mpl_colors
         if self.plotting:
             self.fig = plt.figure(figsize=(12,12))
-            from palettable.colorbrewer.qualitative import Dark2_8
-            colors = Dark2_8.mpl_colors
             c=0
             # plot data per DoF
             # transpose order data as DoF, Time, exp
             for d in (self.dataset.transpose())[1:]:
                 self.ax = self.fig.add_subplot(int(self.DoF/2)+1,2,c+1)
-                self.ax.plot(indices, d[:,:], c=colors[c], linestyle='--', label="demo")
+                self.ax.plot(indices, d[:,:], c=self.colors[c], linestyle='--', label="demo")
                 c+=1
        
             min_traj = np.amin(self.dataset[:,:,1:], axis=0)
             max_traj = np.amax(self.dataset[:,:,1:], axis=0)
-            
             mean_init = np.mean(self.dataset[:,0,1:], 0)
             mean_goal = np.mean(self.dataset[:,-1,1:], 0)
-            
-            g0 = PoseStamped()
-            g0.pose.position.x = mean_goal[0]
-            g0.pose.position.y = mean_goal[1]
-            g0.pose.position.z = mean_goal[2]
-            g0.pose.orientation.x = mean_goal[3]
-            g0.pose.orientation.y = mean_goal[4]
-            g0.pose.orientation.z = mean_goal[5]
-            g0.pose.orientation.w = mean_goal[6]
-            
+
+            #print(self.dataset[:,:,-2:])
+            #print("Mean init and goal")           
+            #print(mean_init) 
+            #print(mean_goal)
+
             # Generate sample data from demos
-            gen_data = self.generate_traj(mean_init, g0, self.motion_duration)
+            #g0 = np.array([pose.pose.position.x, pose.pose.position.y, pose.pose.position.z, pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w, gripper_pose, sucking_goal])
+            gen_data = self.generate_traj(mean_init, mean_goal, self.motion_duration)
             
             for i in np.arange(self.DoF):
                 self.ax = self.fig.add_subplot(int(self.DoF/2)+1,2,i+1)
                 mapped = np.interp(gen_data[:,0], np.arange(len(gen_data[:,1+i])), gen_data[:,1+i])
-                #self.ax.plot(indices, gen_data[:,i], c=colors[i], lw=2, label="dmp")
-                self.ax.plot(gen_data[:,0], gen_data[:,1+i], c=colors[i], lw=2, label="dmp")
-                #self.ax.fill_between(gen_data[:,0], min_traj[:,i], max_traj[:,i], alpha=0.2)
+                self.ax.plot(gen_data[:,0], gen_data[:,1+i], c=self.colors[i], lw=2, label="dmp")
                 self.ax.set_xlabel("time")
                 self.ax.set_ylabel("value")
                 self.ax.set_title("dimension "+str(i))
@@ -131,29 +129,48 @@ class CartDmpController():
 
         self.timer = rospy.Timer(rospy.Duration(0.05), self.timer_cb)
         self.exec_traj = False
+
+        # State variables
         self.cart_arm_state = PoseStamped()
         self.dest_reached = False
+        #self.gripper_state = GripperState()
+        self.gripper_state = 0.20
+        self.sucking_state = 0 # TODO: to be changed with proper type
 
         # Manage DMP parameters
         self.set_param_serv = rospy.Service("/dmp_controller/set_params", SetParams, self.set_params)
         self.get_param_serv = rospy.Service("/dmp_controller/get_params", GetParams, self.get_params)
 
+        # get arm state
         self.cart_arm_state_sub = rospy.Subscriber("/iiwa/state/CartesianPose", PoseStamped, self.cart_arm_state_cb)
         self.cart_arm_state_sub = rospy.Subscriber("/iiwa/state/DestinationReached", Time, self.dest_reached_cb)
-        self.cart_arm_command_pub = rospy.Publisher("/iiwa/command/CartesianPose", PoseStamped, queue_size=1)
-        #self.cart_goal_sub = rospy.Subscriber("/iiwa/dmp_goal", PoseStamped, self.goal_cb)
-        self.cart_goal_sub = rospy.Subscriber("/iiwa/dmp_goal", DMPGoal, self.goal_cb)
+        self.gripper_state_sub = rospy.Subscriber("/caros_schunkpg70/caros_gripper_service_interface/gripper_state", GripperState, self.gripper_state_cb)
+        #self.airpump_sub = rospy.Subscriber("/airpump/state", AirpumpState, self.airpump_state_cb)
         
+        # outputs
+        self.cart_arm_command_pub = rospy.Publisher("iiwa/command/CartesianPose", PoseStamped, queue_size=1)
+        # These should be service proxies
+        self.gripper_proxy = rospy.ServiceProxy("/caros_schunkpg70/caros_gripper_service_interface/move_q", GripperMoveQ)
+        self.suckingtool_proxy = rospy.ServiceProxy("~ss_service", Empty)
+        #self.gripper_command_pub = rospy.Publisher("/iiwa/command/CartesianPose", PoseStamped, queue_size=1)
+        #self.suckingtool_command_pub = rospy.Publisher("/iiwa/command/CartesianPose", PoseStamped, queue_size=1)
+        
+        self.cart_goal_sub = rospy.Subscriber("iiwa/dmp_goal", UltimateDMPGoal, self.goal_cb)
+
         print("Controller initialized")
         
     def dest_reached_cb(self, msg):
         self.dest_reached = True
 
     def cart_arm_state_cb(self, msg):
-        #print(msg)
         # Position in joint space
-        #self.arm_state = msg.actual.positions
         self.cart_arm_state = msg
+
+    def gripper_state_cb(self, msg):
+        self.gripper_state = msg
+    
+    def airpump_state_cb(self, msg):
+        self.sucking_state = msg
 
     # service implementation
     def set_params(self, req):
@@ -231,33 +248,22 @@ class CartDmpController():
         params.data = params_values
         return params 
 
-    #def right_ptp_cb(self, msg):
-    #    if msg.data[0]:
-    #        self.right_ptp_done.set()
-    #    else:
-    #        self.right_ptp_done.clear()
-
-    #def left_ptp_cb(self, msg):
-    #    if msg.data[0]:
-    #        self.left_ptp_done.set()
-    #    else:
-    #        self.left_ptp_done.clear()
-
-    def generate_traj(self, x0, pose, duration):
+    # TODO: UPDATE X0 FOR POSE+GRIPPER+SUCKING
+    def generate_traj(self, x0, g0, duration):
+        #g0 = pose, gripper_pose, sucking
         # Set force feedback to zero for this example
         zeta = 0 # force feedback at
 
         # Set delta time for numerical differentiation 
-        #nb_target_points = 40
         nb_target_points = self.miniLength
-        #dt = self.motion_duration/nb_target_points
         self.motion_duration = float(duration)
         dt = float(duration)/nb_target_points
-        #des_tau = self.motion_duration
         des_tau = float(duration)
 
-        # Initialize current position and velocities ( e.g. move the arm to the initial position )
-        g0 = np.array([pose.pose.position.x, pose.pose.position.y, pose.pose.position.z, pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w])
+        if len(g0) != 9:
+            print("Goal has a wrong size ... giving up.")
+            return 
+        #g0 = np.array([pose.pose.position.x, pose.pose.position.y, pose.pose.position.z, pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w])
     
         current_pos = x0 
         current_vel = np.zeros(self.DoF)  # Initially the robot arm is at rest
@@ -269,8 +275,9 @@ class CartDmpController():
         #traj = np.zeros(3)
         # Adding x0 at traj point list
         traj = x0
+        print("x0")
         print(x0)
-        joint_traj = np.zeros(7)
+        #joint_traj = np.zeros(7)
         time_traj = np.zeros((1,1))
 
         for i in np.arange(self.miniLength-1):
@@ -297,19 +304,35 @@ class CartDmpController():
 
     # now traj callbacks should convert the cart goal into a joint trajectory
     def goal_cb(self, msg):
-        print("Goal received:")
-        print(msg)
-        # MSG is a cartesian goal pose + duration (DMPGoal.msg)
-        x0 = np.array([self.cart_arm_state.pose.position.x, self.cart_arm_state.pose.position.y, self.cart_arm_state.pose.position.z, self.cart_arm_state.pose.orientation.x, self.cart_arm_state.pose.orientation.y, self.cart_arm_state.pose.orientation.z, self.cart_arm_state.pose.orientation.w])
+        print("Goal received")
+        #print(msg)
+        # MSG is a cartesian goal pose + gripper state + sucking tool + duration (UltimateDMPGoal.msg)
+        x0 = np.array([self.cart_arm_state.pose.position.x, self.cart_arm_state.pose.position.y, self.cart_arm_state.pose.position.z, self.cart_arm_state.pose.orientation.x, self.cart_arm_state.pose.orientation.y, self.cart_arm_state.pose.orientation.z, self.cart_arm_state.pose.orientation.w, self.gripper_state, self.sucking_state])
+        #x0 = np.array([self.cart_arm_state.pose.position.x, self.cart_arm_state.pose.position.y, self.cart_arm_state.pose.position.z, self.cart_arm_state.pose.orientation.x, self.cart_arm_state.pose.orientation.y, self.cart_arm_state.pose.orientation.z, self.cart_arm_state.pose.orientation.w, self.gripper_state.q.data, self.sucking_state])
         
-        #print(msg.cart_pose.header.stamp.secs)
-        #print(msg.cart_pose.pose)
         duration = msg.duration
-        #print(type(duration.to_sec()))
+        g0 = np.array([msg.cart_pose.pose.position.x, msg.cart_pose.pose.position.y, msg.cart_pose.pose.position.z, msg.cart_pose.pose.orientation.x, msg.cart_pose.pose.orientation.y, msg.cart_pose.pose.orientation.z, msg.cart_pose.pose.orientation.w, msg.gripper_state, msg.sucking_state])
+        # Compute DMP traj from received goal
+        gen_data = self.generate_traj(x0, g0,  duration.data.to_sec()) # result of IK
+        self.traj = gen_data
+        self.traj[:,-1] = np.where(self.traj[:,-1] < 0.5, 0,1)
+        #self.traj[:,-1] = np.clip(self.traj[:,-1], 0,1)
+        print("\033[31mGo Signal disabled for testing\033[39m")
+        self.exec_traj = False
+       
+        if self.plotting:
+            self.fig = plt.figure(figsize=(12,12))
+            for i in np.arange(self.DoF):
+                self.ax = self.fig.add_subplot(int(self.DoF/2)+1,2,i+1)
+                mapped = np.interp(gen_data[:,0], np.arange(len(gen_data[:,1+i])), gen_data[:,1+i])
+                self.ax.plot(gen_data[:,0], gen_data[:,1+i], c=self.colors[i], lw=2, label="dmp")
+                self.ax.set_xlabel("time")
+                self.ax.set_ylabel("value")
+                self.ax.set_title("dimension "+str(i))
+                self.ax.legend(loc=0, ncol=2, prop={'size': 10})
+            plt.tight_layout()
+            plt.show()
 
-        traj = self.generate_traj(x0, msg.cart_pose, duration.data.to_sec()) # result of IK
-        self.traj = traj
-        self.exec_traj = True
         print("Arm traj")
         print(self.exec_traj)
 
@@ -325,6 +348,8 @@ class CartDmpController():
             #start_time = rospy.Time.now()
             for d in self.traj:
                 cmd = PoseStamped()
+                grip_cmd = Int()
+                suck_cmd = Empty()
                 cmd.pose.position.x = d[offset+0]
                 cmd.pose.position.y = d[offset+1]
                 # Adding boundary value on z to avoid collision with the table
@@ -341,9 +366,9 @@ class CartDmpController():
                 timeout = 0.1
                 minimal_walltime_timeout = 0.1
                 try:
-                    #self.left_ptp_pub.publish(cmd)
-                    self.cart_arm_command_pub.publish(cmd)
-                    #print(d[0] - prev)
+                    self.cart_arm_command_pub.publish(grip_cmd)
+                    self.gripper_proxy.publish(cmd)
+                    self.suckingtool_proxy.publish(suck_cmd)
                     rospy.sleep(d[0] - prev)
                     prev = d[0]
                     # Waiting is not needed: it creates shaky movements 
@@ -371,7 +396,7 @@ if __name__ == "__main__":
     rospy.init_node("iiwa_cart_dmp")
     print(args.demo)
 
-    dcc = CartDmpController(db=args.demo, saving=args.save, plotting=args.plot)
+    dcc = UltimateController(db=args.demo, saving=args.save, plotting=args.plot)
 
     rospy.spin()
 

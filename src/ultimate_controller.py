@@ -101,13 +101,7 @@ class UltimateController():
             mean_init = np.mean(self.dataset[:,0,1:], 0)
             mean_goal = np.mean(self.dataset[:,-1,1:], 0)
 
-            #print(self.dataset[:,:,-2:])
-            #print("Mean init and goal")           
-            #print(mean_init) 
-            #print(mean_goal)
-
             # Generate sample data from demos
-            #g0 = np.array([pose.pose.position.x, pose.pose.position.y, pose.pose.position.z, pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w, gripper_pose, sucking_goal])
             gen_data = self.generate_traj(mean_init, mean_goal, self.motion_duration)
             
             for i in np.arange(self.DoF):
@@ -133,9 +127,11 @@ class UltimateController():
         # State variables
         self.cart_arm_state = PoseStamped()
         self.dest_reached = False
-        #self.gripper_state = GripperState()
-        self.gripper_state = 0.20
-        self.sucking_state = 0 # TODO: to be changed with proper type
+        self.gripper_state = GripperState()
+        #self.gripper_state = 0.20
+        self.gripper_limits = {'min': 0.002, 'max': 0.032}
+        self.suction_limits = {'min': 0, 'max': 1024}
+        self.suction_state = Int32() 
 
         # Manage DMP parameters
         self.set_param_serv = rospy.Service("/dmp_controller/set_params", SetParams, self.set_params)
@@ -145,15 +141,15 @@ class UltimateController():
         self.cart_arm_state_sub = rospy.Subscriber("/iiwa/state/CartesianPose", PoseStamped, self.cart_arm_state_cb)
         self.cart_arm_state_sub = rospy.Subscriber("/iiwa/state/DestinationReached", Time, self.dest_reached_cb)
         self.gripper_state_sub = rospy.Subscriber("/caros_schunkpg70/caros_gripper_service_interface/gripper_state", GripperState, self.gripper_state_cb)
-        #self.airpump_sub = rospy.Subscriber("/airpump/state", AirpumpState, self.airpump_state_cb)
+        self.suctiontool_sub = rospy.Subscriber("/suction_gripper/state", Int32, self.suction_state_cb)
         
         # outputs
         self.cart_arm_command_pub = rospy.Publisher("iiwa/command/CartesianPose", PoseStamped, queue_size=1)
         # These should be service proxies
         self.gripper_proxy = rospy.ServiceProxy("/caros_schunkpg70/caros_gripper_service_interface/move_q", GripperMoveQ)
-        self.suckingtool_proxy = rospy.ServiceProxy("~ss_service", Empty)
+        self.suctiontool_proxy = rospy.ServiceProxy("~ss_service", Empty)
         #self.gripper_command_pub = rospy.Publisher("/iiwa/command/CartesianPose", PoseStamped, queue_size=1)
-        #self.suckingtool_command_pub = rospy.Publisher("/iiwa/command/CartesianPose", PoseStamped, queue_size=1)
+        self.suctiontool_command_pub = rospy.Publisher("/suction_gripper/strength", Int32, queue_size=1)
         
         self.cart_goal_sub = rospy.Subscriber("iiwa/dmp_goal", UltimateDMPGoal, self.goal_cb)
 
@@ -167,10 +163,12 @@ class UltimateController():
         self.cart_arm_state = msg
 
     def gripper_state_cb(self, msg):
+        #print(msg)
         self.gripper_state = msg
     
-    def airpump_state_cb(self, msg):
-        self.sucking_state = msg
+    def suction_state_cb(self, msg):
+        #print(msg.data)
+        self.suction_state = msg
 
     # service implementation
     def set_params(self, req):
@@ -250,7 +248,7 @@ class UltimateController():
 
     # TODO: UPDATE X0 FOR POSE+GRIPPER+SUCKING
     def generate_traj(self, x0, g0, duration):
-        #g0 = pose, gripper_pose, sucking
+        #g0 = pose, gripper_pose, suction
         # Set force feedback to zero for this example
         zeta = 0 # force feedback at
 
@@ -275,8 +273,6 @@ class UltimateController():
         #traj = np.zeros(3)
         # Adding x0 at traj point list
         traj = x0
-        print("x0")
-        print(x0)
         #joint_traj = np.zeros(7)
         time_traj = np.zeros((1,1))
 
@@ -306,17 +302,21 @@ class UltimateController():
     def goal_cb(self, msg):
         print("Goal received")
         #print(msg)
-        # MSG is a cartesian goal pose + gripper state + sucking tool + duration (UltimateDMPGoal.msg)
-        x0 = np.array([self.cart_arm_state.pose.position.x, self.cart_arm_state.pose.position.y, self.cart_arm_state.pose.position.z, self.cart_arm_state.pose.orientation.x, self.cart_arm_state.pose.orientation.y, self.cart_arm_state.pose.orientation.z, self.cart_arm_state.pose.orientation.w, self.gripper_state, self.sucking_state])
-        #x0 = np.array([self.cart_arm_state.pose.position.x, self.cart_arm_state.pose.position.y, self.cart_arm_state.pose.position.z, self.cart_arm_state.pose.orientation.x, self.cart_arm_state.pose.orientation.y, self.cart_arm_state.pose.orientation.z, self.cart_arm_state.pose.orientation.w, self.gripper_state.q.data, self.sucking_state])
+        # MSG is a cartesian goal pose + gripper state + suction tool + duration (UltimateDMPGoal.msg)
+        print(self.gripper_state.q.data)
+        print(self.suction_state)
+        x0 = np.array([self.cart_arm_state.pose.position.x, self.cart_arm_state.pose.position.y, self.cart_arm_state.pose.position.z, self.cart_arm_state.pose.orientation.x, self.cart_arm_state.pose.orientation.y, self.cart_arm_state.pose.orientation.z, self.cart_arm_state.pose.orientation.w, self.gripper_state.q.data[0], self.suction_state.data])
         
         duration = msg.duration
-        g0 = np.array([msg.cart_pose.pose.position.x, msg.cart_pose.pose.position.y, msg.cart_pose.pose.position.z, msg.cart_pose.pose.orientation.x, msg.cart_pose.pose.orientation.y, msg.cart_pose.pose.orientation.z, msg.cart_pose.pose.orientation.w, msg.gripper_state, msg.sucking_state])
+        g0 = np.array([msg.cart_pose.pose.position.x, msg.cart_pose.pose.position.y, msg.cart_pose.pose.position.z, msg.cart_pose.pose.orientation.x, msg.cart_pose.pose.orientation.y, msg.cart_pose.pose.orientation.z, msg.cart_pose.pose.orientation.w, msg.gripper_state.q.data[0], msg.suction_state.data])
         # Compute DMP traj from received goal
+        print(x0)
+        print(g0)
         gen_data = self.generate_traj(x0, g0,  duration.data.to_sec()) # result of IK
         self.traj = gen_data
-        self.traj[:,-1] = np.where(self.traj[:,-1] < 0.5, 0,1)
-        #self.traj[:,-1] = np.clip(self.traj[:,-1], 0,1)
+        #self.traj[:,-1] = np.where(self.traj[:,-1] < 0.5, 0,1)
+        self.traj[:,-2] = np.clip(self.traj[:,-2], self.gripper_limits['min'], self.gripper_limits['max'])
+        self.traj[:,-1] = np.clip(self.traj[:,-1], self.suction_limits['min'], self.suction_limits['max'])
         print("\033[31mGo Signal disabled for testing\033[39m")
         self.exec_traj = False
        
@@ -368,7 +368,7 @@ class UltimateController():
                 try:
                     self.cart_arm_command_pub.publish(grip_cmd)
                     self.gripper_proxy.publish(cmd)
-                    self.suckingtool_proxy.publish(suck_cmd)
+                    self.suctiontool_proxy.publish(suck_cmd)
                     rospy.sleep(d[0] - prev)
                     prev = d[0]
                     # Waiting is not needed: it creates shaky movements 

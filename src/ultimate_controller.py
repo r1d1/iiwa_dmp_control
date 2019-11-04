@@ -48,6 +48,7 @@ class UltimateController():
                 raw_traj_data.append(pd.read_csv(f, index_col=0))
                 lengths.append(len(raw_traj_data[-1]))
 
+        print(raw_traj_data[0])
         nb_exp = len(raw_traj_data)
         #print(raw_traj_data[0]['scaled_time'])
         print(nb_exp, " demonstrations provided")
@@ -56,7 +57,7 @@ class UltimateController():
         print("Max data length", self.miniLength)
         # interpolate to have same size data
         # raw_traj_data : 1 element per exp, e.g. 5 elements
-        self.motion_duration = 4.35
+        #self.motion_duration = 4.35
         indices = np.linspace(0., self.motion_duration, num=self.miniLength)
         print("indices len:",len(indices))
         for d in raw_traj_data:
@@ -71,7 +72,7 @@ class UltimateController():
 
         # ------------------------ end of dmp stuff
         # Degrees of freedom for DMP 
-        # cartesian dmp + gripper + suck, thus (3+4)+1+1 or 7 dof
+        # cartesian dmp + suction + gripper thus (3+4)+1+1 or 7 dof
         self.DoF = self.dataset[0,0,1:].shape[0]
         print("Found",self.DoF,"DOF in data.")
         
@@ -85,7 +86,8 @@ class UltimateController():
         # ------- Plotting
         self.fig = None
         from palettable.colorbrewer.qualitative import Set3_12
-        self.colors = Set3_12.mpl_colors
+        from palettable.scientific.diverging import Berlin_20
+        self.colors = Berlin_20.mpl_colors
         if self.plotting:
             self.fig = plt.figure(figsize=(12,12))
             c=0
@@ -101,6 +103,7 @@ class UltimateController():
             mean_init = np.mean(self.dataset[:,0,1:], 0)
             mean_goal = np.mean(self.dataset[:,-1,1:], 0)
 
+            print(mean_goal)
             # Generate sample data from demos
             gen_data = self.generate_traj(mean_init, mean_goal, self.motion_duration)
             
@@ -305,10 +308,10 @@ class UltimateController():
         # MSG is a cartesian goal pose + gripper state + suction tool + duration (UltimateDMPGoal.msg)
         print(self.gripper_state.q.data)
         print(self.suction_state)
-        x0 = np.array([self.cart_arm_state.pose.position.x, self.cart_arm_state.pose.position.y, self.cart_arm_state.pose.position.z, self.cart_arm_state.pose.orientation.x, self.cart_arm_state.pose.orientation.y, self.cart_arm_state.pose.orientation.z, self.cart_arm_state.pose.orientation.w, self.gripper_state.q.data[0], self.suction_state.data])
+        x0 = np.array([self.cart_arm_state.pose.position.x, self.cart_arm_state.pose.position.y, self.cart_arm_state.pose.position.z, self.cart_arm_state.pose.orientation.x, self.cart_arm_state.pose.orientation.y, self.cart_arm_state.pose.orientation.z, self.cart_arm_state.pose.orientation.w, self.suction_state.data, self.gripper_state.q.data[0]])
         
         duration = msg.duration
-        g0 = np.array([msg.cart_pose.pose.position.x, msg.cart_pose.pose.position.y, msg.cart_pose.pose.position.z, msg.cart_pose.pose.orientation.x, msg.cart_pose.pose.orientation.y, msg.cart_pose.pose.orientation.z, msg.cart_pose.pose.orientation.w, msg.gripper_state.q.data[0], msg.suction_state.data])
+        g0 = np.array([msg.cart_pose.pose.position.x, msg.cart_pose.pose.position.y, msg.cart_pose.pose.position.z, msg.cart_pose.pose.orientation.x, msg.cart_pose.pose.orientation.y, msg.cart_pose.pose.orientation.z, msg.cart_pose.pose.orientation.w, msg.suction_state.data, msg.gripper_state.q.data[0]])
         # Compute DMP traj from received goal
         print(x0)
         print(g0)
